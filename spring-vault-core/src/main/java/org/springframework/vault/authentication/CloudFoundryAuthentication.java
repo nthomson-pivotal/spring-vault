@@ -6,10 +6,7 @@ import java.security.PrivateKey;
 import java.security.Signature;
 import java.security.spec.MGF1ParameterSpec;
 import java.security.spec.PSSParameterSpec;
-import java.text.DateFormat;
-import java.text.SimpleDateFormat;
-import java.util.Date;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 import org.apache.commons.logging.Log;
@@ -17,6 +14,10 @@ import org.apache.commons.logging.LogFactory;
 import org.bouncycastle.openssl.PEMKeyPair;
 import org.bouncycastle.openssl.PEMParser;
 import org.bouncycastle.openssl.jcajce.JcaPEMKeyConverter;
+import org.joda.time.DateTime;
+import org.joda.time.DateTimeZone;
+import org.joda.time.format.DateTimeFormatter;
+import org.joda.time.format.ISODateTimeFormat;
 import org.springframework.vault.VaultException;
 import org.springframework.vault.support.VaultResponse;
 import org.springframework.vault.support.VaultToken;
@@ -26,42 +27,38 @@ import org.springframework.web.client.RestOperations;
 public class CloudFoundryAuthentication implements ClientAuthentication {
 
 	private static final Log logger = LogFactory.getLog(CloudFoundryAuthentication.class);
-	
-	private static final DateFormat dateFormatter = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssZ");
 
 	private final CloudFoundryAuthenticationOptions options;
 
 	private final RestOperations restOperations;
 
-	public CloudFoundryAuthentication(CloudFoundryAuthenticationOptions options, 
-			RestOperations restOperations) {
+	public CloudFoundryAuthentication(CloudFoundryAuthenticationOptions options, RestOperations restOperations) {
 		this.options = options;
 		this.restOperations = restOperations;
 	}
 
 	@Override
 	public VaultToken login() {
-		Map<String, String> login = new HashMap<String, String>();
-
 		String role = options.getRole();
 		String certificate = options.getCertificateSupplier().get();
-		
-		PrivateKey key = createKey(options.getKeySupplier().get());
 
-		String timeSigned = dateFormatter.format(new Date());
+		PrivateKey privateKey = createPrivateKey(options.getKeySupplier().get());
 		
-		String signature = sign(Sha256.toSha256(timeSigned +
-				certificate +
-				role), key);
-		
-		login.put("role", role);
-		login.put("signing_time", timeSigned);
-		login.put("signature", signature);
-		login.put("cf_instance_cert", certificate);
+		DateTimeFormatter fmt = ISODateTimeFormat.dateTimeNoMillis();
+		String signingTimeStr = fmt.print(DateTime.now().withZone(DateTimeZone.UTC));
+
+		String payload = signingTimeStr.trim() + certificate.trim() + role.trim();
+		System.out.println(payload);
 
 		try {
-			VaultResponse response = restOperations.postForObject("auth/{mount}/login", 
-					login, VaultResponse.class, options.getPath());
+			Map<String, String> login = new LinkedHashMap<String, String>();
+			login.put("role", role.trim());
+			login.put("signing_time", signingTimeStr.trim());
+			login.put("cf_instance_cert", certificate.trim());
+			login.put("signature", sign(payload.getBytes(), privateKey).trim());
+
+			VaultResponse response = restOperations.postForObject("auth/{mount}/login", login, VaultResponse.class,
+					options.getPath());
 
 			logger.debug("Login successful using CloudFoundry authentication");
 
@@ -70,36 +67,35 @@ public class CloudFoundryAuthentication implements ClientAuthentication {
 			throw VaultLoginException.create("CloudFoundry", e);
 		}
 	}
-	
-	private static String sign(String checksum, PrivateKey key) throws VaultException {
+
+	private static String sign(byte[] data, PrivateKey key) throws VaultException {
 		try {
-			Signature signature = Signature.getInstance("SHA256withRSA/PSS");
-			signature.setParameter(new PSSParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA256, 32, 1));
+
+			Signature signature = Signature.getInstance("RSASSA-PSS", "BC");
+			signature.setParameter(new PSSParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA256, 222,
+					PSSParameterSpec.DEFAULT.getTrailerField()));
 			signature.initSign(key);
-	        signature.update(checksum.getBytes());
-	        
-	        String encoded = java.util.Base64.getEncoder().encodeToString(signature.sign());
-	        
-	        return encoded.replace('+', '-').replace('/', '_');
-        }
-		catch(Exception e) {
+			signature.update(data);
+			byte[] sig = signature.sign();
+
+			return java.util.Base64.getUrlEncoder().encodeToString(sig);
+		} catch (Exception e) {
 			throw new VaultException("Failed to sign checksum", e);
 		}
 	}
-	
-	private static PrivateKey createKey(String contents) {
+
+	private static PrivateKey createPrivateKey(String contents) {
 		PrivateKey key;
-		
+
 		try (PEMParser pemParser = new PEMParser(new StringReader(contents))) {
-			JcaPEMKeyConverter converter = new JcaPEMKeyConverter().setProvider("BC");
+			JcaPEMKeyConverter converter = new JcaPEMKeyConverter();
 			Object object = pemParser.readObject();
 			KeyPair kp = converter.getKeyPair((PEMKeyPair) object);
 			key = kp.getPrivate();
-		}
-		catch(Exception e) {
+		} catch (Exception e) {
 			throw new VaultException("Failed to load private key", e);
 		}
-		
+
 		return key;
 	}
 }
