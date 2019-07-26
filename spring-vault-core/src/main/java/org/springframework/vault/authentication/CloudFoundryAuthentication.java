@@ -48,7 +48,6 @@ public class CloudFoundryAuthentication implements ClientAuthentication {
 		String signingTimeStr = fmt.print(DateTime.now().withZone(DateTimeZone.UTC));
 
 		String payload = signingTimeStr.trim() + certificate.trim() + role.trim();
-		System.out.println(payload);
 
 		try {
 			Map<String, String> login = new LinkedHashMap<String, String>();
